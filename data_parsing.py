@@ -11,8 +11,11 @@ LICENSE file in the root directory of this source tree.
 import argparse
 import re
 import os
+import string
 import time
 from difflib import SequenceMatcher
+
+from tqdm import tqdm
 
 from utils import *
 
@@ -26,12 +29,25 @@ parser.add_argument('--wiki-file', type=str, required=True,
 	help='Filepath to the Wiktionary dump file to be parsed')
 parser.add_argument('--save-dir', type=str, required=True,
 	help='Filepath at which to save parsed Wikitionary pages')
+parser.add_argument(
+	'--lang',
+	type=str,
+	default="English",
+	choices=["English", "Norsk", "Deutsch", "ru"],
+)
 
 #parts-of-speech we track for senses 
-PARTS_OF_SPEECH = ['noun', 'verb', 'adjective', 'adverb', 'proper noun']
+PARTS_OF_SPEECH = [
+	'noun', 'verb', 'adjective', 'adverb', 'proper noun',
+	'substantiv', 'adjektiv',  'eigenname',
+	'egennavn',
+	'сущ', 'прил', "гл", "нареч",
+]
 
 CHAR_THRESHOLD = 9 #examples should contain 15+ chars
 MIN_MENTION_RATIO = 0.5 #mention of sense overlaps this % with base sense form
+TRANSLATION_TABLE = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
+RU_PATTERN = re.compile(r"[=\s]+")
 
 #calculates longest common subsequence between two strings
 def lcs(str1, str2):
@@ -69,7 +85,10 @@ def clean_text(text, match_sense=''):
 		value = m.group(0)
 		value = re.sub(r'{{|}}', '', value)
 		value = '('+value.strip().split('|')[-1]+')'
-		text = re.sub(r'{{.*?}}', value, text, count=1)
+		try:
+			text = re.sub(r'{{.*?}}', value, text, count=1)
+		except re.error:
+			continue
 
 	#parse out links
 	matches = re.finditer(r'\[\[.*?\]\]', text)
@@ -78,7 +97,10 @@ def clean_text(text, match_sense=''):
 		value = re.sub(r'\[\[|\]\]', '', value)
 		value = ''+value.strip().split('|')[-1]+''
 		if value == '\\': value = '\\\\'
-		text = re.sub(r'\[\[.*?\]\]', value, text, count=1)
+		try:
+			text = re.sub(r'\[\[.*?\]\]', value, text, count=1)
+		except re.error:
+			continue
 	text = re.sub(r'\[\[|\]\]', '', text)
 
 
@@ -265,7 +287,7 @@ def process_sense(lines, word, pos):
 	if len(lines) > 0:
 		for line in lines:
 			#example text
-			if re.match(r'#*?: {{ux', line):
+			if re.match(r'#*?:( {{ux)?', line):
 				ex = process_example(line)
 				if ex != -1:
 					sense['examples'].append(ex)
@@ -314,10 +336,22 @@ def process_language(word, lines):
 	senses = []
 	pos = ''
 	pos_lines = []
+	is_meaning = False
 
 	for line in lines:
-		if line.startswith('='):
-			if line.strip('=').lower() in PARTS_OF_SPEECH: 
+		if (line[0] in '{#=') and (args.lang == "ru"):
+			line_set = set(line.translate(TRANSLATION_TABLE).split())
+			intersection = line_set.intersection(set(PARTS_OF_SPEECH))
+			if intersection:
+				pos = list(intersection)[0]
+			if is_meaning:
+				pos_lines.append(line)
+			if ("=" in line) and ("Значение" in re.sub(RU_PATTERN, "", line)):
+				is_meaning = True
+			else:
+				is_meaning = False
+		elif line[0] in '=':
+			if line.strip('=').lower() in PARTS_OF_SPEECH:
 				if pos in PARTS_OF_SPEECH:
 					#clean up
 					s = process_pos(pos_lines, word, pos)
@@ -329,8 +363,9 @@ def process_language(word, lines):
 				senses.extend(s)
 				pos_lines = []
 				pos = ''
-		
-		elif pos != '':
+
+
+		elif (pos != '') and (args.lang != "ru"):
 			pos_lines.append(line)
 
 	#clean up last pos if not done
@@ -374,7 +409,7 @@ def process_page(lines):
 			if re.match(r'^==[^=]*?==$', line):
 				lang = line.replace('==', '')
 				lang_lines = []
-				if lang == 'English': in_lang = True
+				if args.lang in lang: in_lang = True
 				else: in_lang = False 
 			elif in_lang:
 				if line == '----':
@@ -455,7 +490,7 @@ def post_processing(senses):
 def main(args):
 	#load wikitionary dump data file
 	start_time = time.time()
-	f = open(args.wiki_file, 'r')
+	f = open(os.path.expanduser(args.wiki_file), 'r')
 
 	#track status in file
 	curr_page = []
@@ -465,7 +500,7 @@ def main(args):
 	senses = []
 
 	#scan through file and process pages sequentially 
-	for line in f:
+	for line in tqdm(f):
 		line = line.strip()
 		if line == '<page>': 
 			is_page = True
