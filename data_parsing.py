@@ -49,6 +49,8 @@ MIN_MENTION_RATIO = 0.5 #mention of sense overlaps this % with base sense form
 TRANSLATION_TABLE = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
 RU_PATTERN = re.compile(r"[=\s]+")
 RU_EXAMPLE_PATTERN = re.compile(r"{{пример\|(.+)}}")
+GERMAN_PATTERN = re.compile(r":\[\d+\]")
+REF_PATTERN = re.compile(r"<ref>.+<\/ref>")
 
 #calculates longest common subsequence between two strings
 def lcs(str1, str2):
@@ -363,6 +365,42 @@ def process_pos(lines, word, pos):
 
 	return senses
 
+
+def process_german_pos(lines, word, pos):
+	is_meaning, is_example = True, False
+	sense_lines = {}
+	for line in lines:
+		number = re.match(GERMAN_PATTERN, line)
+		if number is not None:
+			number_str = number.group(0)
+			if number_str not in sense_lines:
+				sense_lines[number_str] = generate_sense(word, pos)
+			if is_meaning:
+				gloss, depth, tags = process_gloss(line)
+				if gloss == -1: sense_lines[number_str] = -1
+				sense_lines[number_str]['gloss'] = clean_text(
+					gloss[number.end():],
+				)
+				sense_lines[number_str]['depth'] = depth
+				sense_lines[number_str]['tags'].extend(tags)
+			elif is_example:
+				if not 'Beispiele fehlen' in line:
+					sense_lines[number_str]['examples'].append(
+						re.sub(
+							REF_PATTERN, "", clean_text(
+								line[number.end():],
+							),
+						),
+					)
+		elif "Beispiele" in line:
+			is_meaning = False
+			is_example = True
+		else:
+			is_meaning = False
+			is_example = False
+	return list(sense_lines.values())
+
+
 #processes the senses in a language (EN) for a given word
 def process_language(word, lines):
 	senses = []
@@ -371,8 +409,22 @@ def process_language(word, lines):
 	is_meaning = False
 
 	for line in lines:
+		if args.lang == "Deutsch":
+			if line.startswith("="):
+				if is_meaning:
+					is_meaning = False
+				line_set = set([x.lower() for x in
+								line.translate(TRANSLATION_TABLE).split()])
+				intersection = line_set.intersection(set(PARTS_OF_SPEECH))
+				if intersection:
+					pos = list(intersection)[0]
+			if is_meaning:
+				pos_lines.append(line)
+			if 'Bedeutungen' in line:
+				is_meaning = True
+
 		if (line[0] in '{=') and (args.lang == "ru"):
-			line_set = set(line.translate(TRANSLATION_TABLE).split())
+			line_set = set([x.lower() for x in line.translate(TRANSLATION_TABLE).split()])
 			intersection = line_set.intersection(set(PARTS_OF_SPEECH))
 			if intersection:
 				pos = list(intersection)[0]
@@ -382,6 +434,7 @@ def process_language(word, lines):
 				is_meaning = True
 			else:
 				is_meaning = False
+
 		elif line.startswith("#") and (args.lang == "ru"):
 			if is_meaning:
 				pos_lines.append(line)
@@ -406,7 +459,10 @@ def process_language(word, lines):
 
 	#clean up last pos if not done
 	if len(pos_lines) > 0:
-		s = process_pos(pos_lines, word, pos)
+		if not args.lang == "Deutsch":
+			s = process_pos(pos_lines, word, pos)
+		else:
+			s = process_german_pos(pos_lines, word, pos)
 		senses.extend(s)
 
 	if len(senses) > 0:
