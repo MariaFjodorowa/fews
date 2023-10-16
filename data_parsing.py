@@ -48,6 +48,7 @@ CHAR_THRESHOLD = 9 #examples should contain 15+ chars
 MIN_MENTION_RATIO = 0.5 #mention of sense overlaps this % with base sense form
 TRANSLATION_TABLE = str.maketrans(string.punctuation, ' ' * len(string.punctuation))
 RU_PATTERN = re.compile(r"[=\s]+")
+RU_EXAMPLE_PATTERN = re.compile(r"{{пример\|(.+)}}")
 
 #calculates longest common subsequence between two strings
 def lcs(str1, str2):
@@ -58,15 +59,14 @@ def lcs(str1, str2):
 	else:
 		return ''
 
-#cleans text from wikipedia to get rid of meta data, wiki markup, html formatting
-def clean_text(text, match_sense=''):
-	#get rid of meta data
+
+def remove_wikipedia_and_html(text):
+	# get rid of meta data
 	text = re.sub(r'\[\[Category:.*?\]\]', '', text)
 	text = re.sub(r'\[\[File:.*?\]\]', '', text)
 	text = re.sub(r'/ :*? \'\'\'Usage.*$', '', text)
 
-
-	#fix math+ symbols
+	# fix math+ symbols
 	text = re.sub(r'&lt;', '<', text)
 	text = re.sub(r'&gt;', '>', text)
 	text = re.sub(r'&amp;', '&', text)
@@ -78,6 +78,12 @@ def clean_text(text, match_sense=''):
 	text = re.sub(r'\\pi', 'π', text)
 	text = re.sub(r'\\dot', '·', text)
 	text = re.sub(r'<br/?>', '/ ', text)
+	return text
+
+
+#cleans text from wikipedia to get rid of meta data, wiki markup, html formatting
+def clean_text(text, match_sense=''):
+	text = remove_wikipedia_and_html(text)
 
 	#parse these metadata links out
 	matches = re.finditer(r'{{.*?}}', text)
@@ -169,6 +175,28 @@ def process_gloss(line):
 		tags = t.group(1).strip().split('|')[1:]
 
 	return gloss, depth, tags
+
+
+def process_russian_gloss(line, sense):
+	depth = len(line) - len(
+		line.lstrip('#'))  # to get number of # at beginning of line
+	line = line.strip('#').strip()
+	sense['examples'] = []
+	# strip out tags, comments
+	gloss = re.sub(r'{{lb.*?}}', '', line).strip()
+	gloss = re.sub(r'&lt;!--.*?--&gt;', '', gloss).strip()
+	for i, match in enumerate(re.finditer(RU_EXAMPLE_PATTERN, gloss)):
+		if i == 0:
+			gloss = gloss[:match.start()]
+		sense['examples'].append(clean_text(match.group(1)))
+	gloss = clean_text(gloss)
+	# ignore senses with no gloss or only tags in gloss (not text)
+	if len(gloss) == 0 or len(re.sub(r'\(.*?\)\.?', '', gloss.strip())) == 0:
+		return -1
+
+	sense['gloss'] = gloss
+	sense['depth'] = depth
+	return sense
 
 #processes the example text contained in given line
 def process_example(line):
@@ -274,35 +302,39 @@ def process_sense(lines, word, pos):
 	
 	#process first line in sense as definition/gloss
 	line = lines[0]
-	gloss, depth, tags = process_gloss(line)
-	if gloss == -1: return -1
-	sense['gloss'] = gloss
-	sense['depth'] = depth
-	sense['tags'].extend(tags)
+	if args.lang == "ru":
+		sense = process_russian_gloss(line, sense)
 
-	#clean up lines formatting
-	lines = compress_lines(lines[1:])
+	else:
+		gloss, depth, tags = process_gloss(line)
+		if gloss == -1: return -1
+		sense['gloss'] = gloss
+		sense['depth'] = depth
+		sense['tags'].extend(tags)
 
-	#rest of lines are quotes, examples, or synonyms
-	if len(lines) > 0:
-		for line in lines:
-			#example text
-			if re.match(r'#*?:( {{ux)?', line):
-				ex = process_example(line)
-				if ex != -1:
-					sense['examples'].append(ex)
+		#clean up lines formatting
+		lines = compress_lines(lines[1:])
 
-			#synonyms
-			elif re.match(r'#*?: {{syn', line):
-				syn = process_synonym(line)
-				sense['synonyms'].extend(syn)
+		#rest of lines are quotes, examples, or synonyms
+		if len(lines) > 0:
+			for line in lines:
+				#example text
+				if re.match(r'#*?:( {{ux)?', line):
+					ex = process_example(line)
+					if ex != -1:
+						sense['examples'].append(ex)
 
-			#quotes
-			elif re.match(r'#*?\* ', line):
-				q, q_tags = process_quotation(line)
-				if q != -1:
-					quote = (q, q_tags)
-					sense['quotations'].append(quote)
+				#synonyms
+				elif re.match(r'#*?: {{syn', line):
+					syn = process_synonym(line)
+					sense['synonyms'].extend(syn)
+
+				#quotes
+				elif re.match(r'#*?\* ', line):
+					q, q_tags = process_quotation(line)
+					if q != -1:
+						quote = (q, q_tags)
+						sense['quotations'].append(quote)
 
 	return sense
 
@@ -339,7 +371,7 @@ def process_language(word, lines):
 	is_meaning = False
 
 	for line in lines:
-		if (line[0] in '{#=') and (args.lang == "ru"):
+		if (line[0] in '{=') and (args.lang == "ru"):
 			line_set = set(line.translate(TRANSLATION_TABLE).split())
 			intersection = line_set.intersection(set(PARTS_OF_SPEECH))
 			if intersection:
@@ -350,6 +382,10 @@ def process_language(word, lines):
 				is_meaning = True
 			else:
 				is_meaning = False
+		elif line.startswith("#") and (args.lang == "ru"):
+			if is_meaning:
+				pos_lines.append(line)
+
 		elif line[0] in '=':
 			if line.strip('=').lower() in PARTS_OF_SPEECH:
 				if pos in PARTS_OF_SPEECH:
@@ -397,18 +433,19 @@ def process_page(lines):
 		if len(line) != 0: l.append(line)
 	if len(l) == 0: return -1 #ignore pages with no text outside of html code
 	else: lines = l
-
+	lang_pattern = re.compile(r'^==?[^=]*?=?=$')
 	#check if there are languages, and process each language seperately 
-	langs_count = len([1 for line in lines if re.match(r'^==[^=]*?==$', line)])
+	langs_count = len([1 for line in lines if re.match(lang_pattern, line)])
 
 	if langs_count > 0:
 		in_lang = False
 		lang_lines = []
 		lang = ''
 		for line in lines:
-			if re.match(r'^==[^=]*?==$', line):
+			if re.match(lang_pattern, line):
 				lang = line.replace('==', '')
 				lang_lines = []
+				args_lang = args.lang
 				if args.lang in lang: in_lang = True
 				else: in_lang = False 
 			elif in_lang:
